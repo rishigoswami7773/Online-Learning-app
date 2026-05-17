@@ -1,0 +1,30 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "flutter": true,
+        "/^powershell -Command \"\\(Get-Content lib/views/screens/registration_screen\\.dart -TotalCount 1018\\)\\[-1\\]\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "dart": true,
+        "Set-Content": true,
+        "Save($file,$text)": true,
+        "ForEach-Object": true,
+        "New-Object": true,
+        ">": true,
+        "WriteFile($file,$text)": true,
+        "snap.data?.docs": true,
+        "a": true,
+        "a.data": true,
+        "b.data": true,
+        "aDate": true,
+        "docs.isEmpty": true,
+        "limited.isEmpty": true,
+        "d": true,
+        "Copy-Item": true,
+        "firebase": true,
+        "0..100": true,
+        "100..300": true,
+        "100..250": true
+    },
+    "postman.settings.dotenv-detection-notification-visibility": false
+}

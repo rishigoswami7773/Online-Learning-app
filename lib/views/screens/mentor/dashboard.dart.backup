@@ -1,0 +1,1885 @@
+import 'dart:async';
+import 'package:file_picker/file_picker.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../../controllers/auth_controller.dart';
+import '../../../controllers/mentor/mentor_courses_controller.dart';
+import '../../../routes/app_routes.dart';
+import '../../../utils/uid_resolver.dart';
+
+const Color _mentorTeal = Color(0xFF0E7C86);
+
+class MentorDashboard extends StatefulWidget {
+  const MentorDashboard({super.key});
+
+  @override
+  State<MentorDashboard> createState() => _MentorDashboardState();
+}
+
+class _MentorDashboardState extends State<MentorDashboard> {
+  late final MentorCoursesController _ctrl;
+  int _selectedIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = MentorCoursesController();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (UidResolver.uid == null && mounted) {
+        context.go(AppRoutes.login);
+      }
+    });
+  }
+
+  Future<_Summary> _loadSummary(String uid) async {
+    final userDoc = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .get();
+    final name = (userDoc.data()?['name'] as String?)?.trim().isNotEmpty == true
+        ? (userDoc.data()!['name'] as String).trim()
+        : 'Mentor';
+    final courseSnap = await FirebaseFirestore.instance
+        .collection('courses')
+        .where('mentorId', isEqualTo: uid)
+        .get();
+    final ids = courseSnap.docs.map((d) => d.id).toList();
+    if (ids.isEmpty) {
+      return _Summary(name: name, courses: 0, students: 0, rating: 0.0);
+    }
+    final studentIds = <String>{};
+    final ratings = <double>[];
+    for (var i = 0; i < ids.length; i += 10) {
+      final chunk = ids.skip(i).take(10).toList();
+      final enroll = await FirebaseFirestore.instance
+          .collection('enrollments')
+          .where('courseId', whereIn: chunk)
+          .get();
+      for (final d in enroll.docs) {
+        final sid = (d.data()['studentId'] as String?)?.trim() ?? '';
+        if (sid.isNotEmpty) studentIds.add(sid);
+      }
+      final reviews = await FirebaseFirestore.instance
+          .collection('reviews')
+          .where('courseId', whereIn: chunk)
+          .get();
+      for (final d in reviews.docs) {
+        final r = (d.data()['rating'] as num?)?.toDouble();
+        if (r != null) ratings.add(r);
+      }
+    }
+    final avg = ratings.isEmpty
+        ? 0.0
+        : ratings.reduce((a, b) => a + b) / ratings.length;
+    return _Summary(
+      name: name,
+      courses: ids.length,
+      students: studentIds.length,
+      rating: avg,
+    );
+  }
+
+  Future<void> _deleteCourse(String courseId, String title) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Delete Course?'),
+        content: const Text('Delete this course? This cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await _ctrl.deleteCourse(courseId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Course deleted')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  Future<void> _togglePublish(String courseId, bool publish) async {
+    await _ctrl.togglePublish(courseId, publish);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(publish ? 'Published' : 'Unpublished')),
+    );
+  }
+
+  Widget _buildBody(String uid) {
+    switch (_selectedIndex) {
+      case 0:
+        return _OverviewTab(uid: uid, loadSummary: _loadSummary);
+      case 1:
+        return _CoursesTab(
+          uid: uid,
+          onDelete: _deleteCourse,
+          onTogglePublish: _togglePublish,
+          onEdit: (data) => context.push(AppRoutes.mentorCreate, extra: data),
+        );
+      default:
+        return _OverviewTab(uid: uid, loadSummary: _loadSummary);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = UidResolver.uid;
+    if (uid == null) {
+      return const Scaffold(body: Center(child: Text('Please login')));
+    }
+
+    return FutureBuilder<_Summary>(
+      future: _loadSummary(uid),
+      builder: (context, snap) {
+        final summary =
+            snap.data ??
+            const _Summary(
+              name: 'Mentor',
+              courses: 0,
+              students: 0,
+              rating: 0.0,
+            );
+
+        return Scaffold(
+          backgroundColor: const Color(0xFFF4F9FA),
+          appBar: AppBar(
+            backgroundColor: Colors.white,
+            elevation: 0,
+            scrolledUnderElevation: 0.5,
+            toolbarHeight: 76,
+            title: Row(
+              children: [
+                CircleAvatar(
+                  radius: 22,
+                  backgroundColor: _mentorTeal.withValues(alpha: 0.15),
+                  child: Text(
+                    summary.name.isNotEmpty
+                        ? summary.name[0].toUpperCase()
+                        : 'M',
+                    style: const TextStyle(
+                      color: _mentorTeal,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 18,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Good morning 👋',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFF52616B),
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        summary.name,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF102A43),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              IconButton(
+                icon: const Icon(
+                  Icons.notifications_none_rounded,
+                  color: _mentorTeal,
+                  size: 24,
+                ),
+                onPressed: () => context.push(AppRoutes.mentorNotifications),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(right: 12),
+                child: GestureDetector(
+                  onTap: () => context.push(AppRoutes.mentorProfile),
+                  child: CircleAvatar(
+                    radius: 18,
+                    backgroundColor: _mentorTeal.withValues(alpha: 0.12),
+                    child: const Icon(
+                      Icons.person_rounded,
+                      color: _mentorTeal,
+                      size: 20,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          body: _buildBody(uid),
+          floatingActionButton: _selectedIndex == 1
+              ? FloatingActionButton.extended(
+                  backgroundColor: _mentorTeal,
+                  foregroundColor: Colors.white,
+                  onPressed: () => context.push(AppRoutes.mentorCreate),
+                  icon: const Icon(Icons.add_rounded),
+                  label: const Text('New Course'),
+                )
+              : null,
+          bottomNavigationBar: NavigationBar(
+            selectedIndex: _selectedIndex,
+            onDestinationSelected: (index) {
+              if (index == 2) {
+                context.push(AppRoutes.mentorStudents);
+                return;
+              }
+              if (index == 3) {
+                context.push(AppRoutes.mentorRatings);
+                return;
+              }
+              setState(() => _selectedIndex = index);
+            },
+            backgroundColor: Colors.white,
+            indicatorColor: _mentorTeal.withValues(alpha: 0.15),
+            destinations: const [
+              NavigationDestination(
+                icon: Icon(Icons.dashboard_rounded),
+                selectedIcon: Icon(Icons.dashboard_rounded),
+                label: 'Overview',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.menu_book_rounded),
+                selectedIcon: Icon(Icons.menu_book_rounded),
+                label: 'My Courses',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.people_rounded),
+                selectedIcon: Icon(Icons.people_rounded),
+                label: 'Students',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.star_rounded),
+                selectedIcon: Icon(Icons.star_rounded),
+                label: 'Ratings',
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ─── Overview ────────────────────────────────────────────────────────────────
+
+class _OverviewTab extends StatelessWidget {
+  final String uid;
+  final Future<_Summary> Function(String) loadSummary;
+  const _OverviewTab({required this.uid, required this.loadSummary});
+
+  Future<int> _mentorEnrollmentCount(String mentorUid) async {
+    final coursesSnap = await FirebaseFirestore.instance
+        .collection('courses')
+        .where('mentorId', isEqualTo: mentorUid)
+        .get();
+    final courseIds = coursesSnap.docs.map((d) => d.id).toList();
+    if (courseIds.isEmpty) {
+      return 0;
+    }
+
+    var total = 0;
+    for (var i = 0; i < courseIds.length; i += 30) {
+      final chunk = courseIds.skip(i).take(30).toList();
+      final enrollSnap = await FirebaseFirestore.instance
+          .collection('enrollments')
+          .where('courseId', whereIn: chunk)
+          .get();
+      total += enrollSnap.size;
+    }
+
+    return total;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<_Summary>(
+      future: loadSummary(uid),
+      builder: (context, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final s =
+            snap.data ??
+            const _Summary(
+              name: 'Mentor',
+              courses: 0,
+              students: 0,
+              rating: 0.0,
+            );
+        return ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            // Gradient Hero Banner
+            Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [_mentorTeal, Color(0xFF17A2B8)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        'Welcome back 👋',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    s.name,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            // Stats Row
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                      stream: FirebaseFirestore.instance
+                          .collection('courses')
+                          .where('mentorId', isEqualTo: uid)
+                          .snapshots(),
+                      builder: (context, snap) {
+                        if (snap.hasError) {
+                          return const _StatCard(
+                            'Courses',
+                            '0',
+                            Icons.menu_book_rounded,
+                          );
+                        }
+                        if (snap.connectionState == ConnectionState.waiting) {
+                          return const Center(
+                            child: CircularProgressIndicator(),
+                          );
+                        }
+                        final count = snap.data?.size ?? 0;
+                        return _StatCard(
+                          'Courses',
+                          count.toString(),
+                          Icons.menu_book_rounded,
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: FutureBuilder<int>(
+                      future: _mentorEnrollmentCount(uid),
+                      builder: (context, snap) {
+                        if (snap.hasError) {
+                          return const _StatCard(
+                            'Students',
+                            '0',
+                            Icons.people_alt_rounded,
+                          );
+                        }
+                        if (snap.connectionState == ConnectionState.waiting) {
+                          return const Center(
+                            child: CircularProgressIndicator(),
+                          );
+                        }
+                        final count = snap.data ?? 0;
+                        return _StatCard(
+                          'Students',
+                          count.toString(),
+                          Icons.people_alt_rounded,
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                      stream: FirebaseFirestore.instance
+                          .collection('reviews')
+                          .where('mentorId', isEqualTo: uid)
+                          .snapshots(),
+                      builder: (context, snap) {
+                        if (snap.hasError) {
+                          return const _StatCard(
+                            'Rating',
+                            '0.0',
+                            Icons.star_rounded,
+                          );
+                        }
+                        if (snap.connectionState == ConnectionState.waiting) {
+                          return const Center(
+                            child: CircularProgressIndicator(),
+                          );
+                        }
+                        final docs = snap.data?.docs ?? [];
+                        if (docs.isEmpty) {
+                          return const _StatCard(
+                            'Rating',
+                            '0.0',
+                            Icons.star_rounded,
+                          );
+                        }
+                        final ratings = docs
+                            .map(
+                              (d) =>
+                                  ((d.data()['rating'] as num?)?.toDouble() ??
+                                  0.0),
+                            )
+                            .toList();
+                        final avg = ratings.isEmpty
+                            ? 0.0
+                            : ratings.reduce((a, b) => a + b) / ratings.length;
+                        return _StatCard(
+                          'Rating',
+                          avg.toStringAsFixed(1),
+                          Icons.star_rounded,
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+            // "My Courses" Section
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'My Courses',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF102A43),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      // Navigate to Courses tab
+                      final state = context
+                          .findAncestorStateOfType<_MentorDashboardState>();
+                      state?.setState(() => state._selectedIndex = 1);
+                    },
+                    child: const Text(
+                      'See All',
+                      style: TextStyle(
+                        color: _mentorTeal,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            // Courses Horizontal ListView
+            FutureBuilder<List<DocumentSnapshot<Map<String, dynamic>>>>(
+              future: FirebaseFirestore.instance
+                  .collection('courses')
+                  .where('mentorId', isEqualTo: uid)
+                  .limit(5)
+                  .get()
+                  .then((snap) => snap.docs),
+              builder: (context, snap) {
+                if (snap.connectionState == ConnectionState.waiting) {
+                  return const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16),
+                    child: Center(child: CircularProgressIndicator()),
+                  );
+                }
+                final docs = snap.data ?? [];
+                if (docs.isEmpty) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Center(
+                      child: Column(
+                        children: [
+                          const Icon(
+                            Icons.school_outlined,
+                            size: 48,
+                            color: Colors.grey,
+                          ),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'No courses yet',
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                          const SizedBox(height: 12),
+                          FilledButton.icon(
+                            onPressed: () =>
+                                context.push(AppRoutes.mentorCreate),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: _mentorTeal,
+                            ),
+                            icon: const Icon(Icons.add, size: 18),
+                            label: const Text('Create Course'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }
+                return SizedBox(
+                  height: 200,
+                  child: ListView.builder(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    scrollDirection: Axis.horizontal,
+                    itemCount: docs.length,
+                    itemBuilder: (context, i) {
+                      final doc = docs[i];
+                      final d = doc.data();
+                      final title = (d['title'] as String?) ?? 'Untitled';
+                      final enroll = ((d['enrollmentCount'] as num?) ?? 0)
+                          .toInt();
+                      final published = (d['isPublished'] as bool?) ?? false;
+
+                      return Padding(
+                        padding: EdgeInsets.only(
+                          right: i == docs.length - 1 ? 0 : 12,
+                        ),
+                        child: _CoursePreviewCard(
+                          title: title,
+                          enrolledCount: enroll,
+                          isPublished: published,
+                        ),
+                      );
+                    },
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 24),
+          ],
+        );
+      },
+    );
+  }
+}
+
+// ─── My Courses ──────────────────────────────────────────────────────────────
+
+class _CoursesTab extends StatefulWidget {
+  final String uid;
+  final Future<void> Function(String, String) onDelete;
+  final Future<void> Function(String, bool) onTogglePublish;
+  final void Function(Map<String, dynamic>) onEdit;
+
+  const _CoursesTab({
+    required this.uid,
+    required this.onDelete,
+    required this.onTogglePublish,
+    required this.onEdit,
+  });
+
+  @override
+  State<_CoursesTab> createState() => _CoursesTabState();
+}
+
+class _CoursesTabState extends State<_CoursesTab> {
+  String _searchQuery = '';
+
+  double _rating(Map<String, dynamic> d) {
+    if (d['rating'] is num) {
+      return (d['rating'] as num).toDouble();
+    }
+    if (d['averageRating'] is num) {
+      return (d['averageRating'] as num).toDouble();
+    }
+    return 0.0;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance
+          .collection('courses')
+          .where('mentorId', isEqualTo: widget.uid)
+          .snapshots(),
+      builder: (context, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        var docs = snap.data?.docs ?? [];
+        docs.sort((a, b) {
+          final aT =
+              (a.data()['createdAt'] as Timestamp?)?.toDate() ??
+              DateTime.fromMillisecondsSinceEpoch(0);
+          final bT =
+              (b.data()['createdAt'] as Timestamp?)?.toDate() ??
+              DateTime.fromMillisecondsSinceEpoch(0);
+          return bT.compareTo(aT);
+        });
+
+        // Filter by search query
+        if (_searchQuery.isNotEmpty) {
+          docs = docs
+              .where(
+                (doc) => ((doc.data()['title'] as String?) ?? '')
+                    .toLowerCase()
+                    .contains(_searchQuery.toLowerCase()),
+              )
+              .toList();
+        }
+
+        if (docs.isEmpty) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(
+                  Icons.menu_book_outlined,
+                  size: 64,
+                  color: Colors.grey,
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'No courses yet',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Tap + New Course to get started.',
+                  style: TextStyle(color: Colors.grey),
+                ),
+                const SizedBox(height: 16),
+                FilledButton.icon(
+                  onPressed: () => context.push(AppRoutes.mentorCreate),
+                  style: FilledButton.styleFrom(backgroundColor: _mentorTeal),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Create Course'),
+                ),
+              ],
+            ),
+          );
+        }
+
+        return Column(
+          children: [
+            // SearchBar
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: SearchBar(
+                hintText: 'Search courses...',
+                leading: const Icon(Icons.search, color: _mentorTeal),
+                onChanged: (value) {
+                  setState(() => _searchQuery = value);
+                },
+                backgroundColor: WidgetStatePropertyAll(
+                  Colors.grey.withValues(alpha: 0.06),
+                ),
+                side: WidgetStatePropertyAll(
+                  BorderSide(color: Colors.grey.withValues(alpha: 0.2)),
+                ),
+              ),
+            ),
+            // Courses ListView
+            Expanded(
+              child: ListView.builder(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                itemCount: docs.length,
+                itemBuilder: (context, i) {
+                  final doc = docs[i];
+                  final d = doc.data();
+                  final title = (d['title'] as String?) ?? 'Untitled';
+                  final category = (d['category'] as String?) ?? '';
+                  final level = (d['level'] as String?) ?? '';
+                  final enroll = ((d['enrollmentCount'] as num?) ?? 0).toInt();
+                  final published = (d['isPublished'] as bool?) ?? false;
+
+                  return Dismissible(
+                    key: ValueKey(doc.id),
+                    direction: DismissDirection.endToStart,
+                    onDismissed: (_) => widget.onDelete(doc.id, title),
+                    background: Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      alignment: Alignment.centerRight,
+                      padding: const EdgeInsets.only(right: 20),
+                      child: const Icon(
+                        Icons.delete_outline,
+                        color: Colors.red,
+                      ),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Card(
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          side: BorderSide(
+                            color: Colors.grey.withValues(alpha: 0.15),
+                          ),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(14),
+                          child: Row(
+                            children: [
+                              // Thumbnail placeholder
+                              Container(
+                                width: 64,
+                                height: 64,
+                                decoration: BoxDecoration(
+                                  gradient: const LinearGradient(
+                                    colors: [_mentorTeal, Color(0xFF17A2B8)],
+                                  ),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: const Icon(
+                                  Icons.school_rounded,
+                                  color: Colors.white,
+                                  size: 28,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              // Content
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      title,
+                                      style: const TextStyle(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Row(
+                                      children: [
+                                        Chip(
+                                          label: Text(
+                                            category,
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                          backgroundColor: _mentorTeal
+                                              .withValues(alpha: 0.1),
+                                          side: BorderSide.none,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                            vertical: 2,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Chip(
+                                          label: Text(
+                                            level,
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                          backgroundColor: Colors.amber
+                                              .withValues(alpha: 0.1),
+                                          side: BorderSide.none,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                            vertical: 2,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      '$enroll student${enroll == 1 ? '' : 's'}',
+                                      style: const TextStyle(
+                                        color: Color(0xFF52616B),
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              // Menu
+                              PopupMenuButton<String>(
+                                onSelected: (action) {
+                                  switch (action) {
+                                    case 'edit':
+                                      widget.onEdit({
+                                        'id': doc.id,
+                                        'title': d['title'],
+                                        'description': d['description'],
+                                        'category': d['category'],
+                                        'level': d['level'],
+                                        'price': d['price'],
+                                      });
+                                      break;
+                                    case 'publish':
+                                      widget.onTogglePublish(
+                                        doc.id,
+                                        !published,
+                                      );
+                                      break;
+                                    case 'delete':
+                                      widget.onDelete(doc.id, title);
+                                      break;
+                                  }
+                                },
+                                itemBuilder: (BuildContext context) => [
+                                  const PopupMenuItem(
+                                    value: 'edit',
+                                    child: Row(
+                                      children: [
+                                        Icon(Icons.edit_outlined),
+                                        SizedBox(width: 10),
+                                        Text('Edit'),
+                                      ],
+                                    ),
+                                  ),
+                                  PopupMenuItem(
+                                    value: 'publish',
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          published
+                                              ? Icons.visibility_off
+                                              : Icons.visibility,
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Text(
+                                          published ? 'Unpublish' : 'Publish',
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const PopupMenuItem(
+                                    value: 'delete',
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          Icons.delete_outline,
+                                          color: Colors.red,
+                                        ),
+                                        SizedBox(width: 10),
+                                        Text(
+                                          'Delete',
+                                          style: TextStyle(color: Colors.red),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showLessonsSheet(BuildContext context, String courseId, String title) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+   
+}
+
+// ─── Lessons Bottom Sheet ────────────────────────────────────────────────────
+
+class LessonsSheet extends StatefulWidget {
+  final String courseId;
+  final String courseTitle;
+  const LessonsSheet({
+    super.key,
+    required this.courseId,
+    required this.courseTitle,
+  });
+
+  @override
+  State<LessonsSheet> createState() => _LessonsSheetState();
+}
+
+class _LessonsSheetState extends State<LessonsSheet> {
+  final _titleCtrl = TextEditingController();
+  final _descCtrl = TextEditingController();
+  bool _saving = false;
+  PlatformFile? _newLessonFile;
+  double _newLessonUploadProgress = 0;
+  bool _uploadingLessonFile = false;
+
+  @override
+  void dispose() {
+    _titleCtrl.dispose();
+    _descCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<PlatformFile?> _pickLessonFile() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf', 'mp4', 'mov', 'avi'],
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return null;
+    return result.files.first;
+  }
+
+  String _contentTypeForFile(String fileName) {
+    final ext = fileName.split('.').last.toLowerCase();
+    return ext == 'pdf' ? 'pdf' : 'video';
+  }
+
+  Future<void> _uploadLessonContent({
+    required String courseId,
+    required String lessonId,
+    required PlatformFile file,
+    required void Function(double progress) onProgress,
+  }) async {
+    final bytes = file.bytes;
+    if (bytes == null) {
+      throw StateError('Selected file has no data');
+    }
+
+    final storageRef = FirebaseStorage.instance.ref().child(
+      'courses/$courseId/lessons/$lessonId/${file.name}',
+    );
+    final ext = file.name.split('.').last.toLowerCase();
+    final metadata = SettableMetadata(
+      contentType: ext == 'pdf' ? 'application/pdf' : 'video/$ext',
+    );
+
+    final uploadTask = storageRef.putData(bytes, metadata);
+    uploadTask.snapshotEvents.listen((event) {
+      final total = event.totalBytes;
+      if (total > 0) {
+        onProgress(event.bytesTransferred / total);
+      }
+    });
+    await uploadTask;
+
+    await FirebaseFirestore.instance
+        .collection('courses')
+        .doc(courseId)
+        .collection('lessons')
+        .doc(lessonId)
+        .update({
+          'contentUrl': await storageRef.getDownloadURL(),
+          'contentType': _contentTypeForFile(file.name),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+  }
+
+  Future<void> _addLesson() async {
+    final t = _titleCtrl.text.trim();
+    if (t.isEmpty) return;
+    setState(() => _saving = true);
+    try {
+      final lessonsRef = FirebaseFirestore.instance
+          .collection('courses')
+          .doc(widget.courseId)
+          .collection('lessons');
+      final count = (await lessonsRef.count().get()).count ?? 0;
+      final lessonDoc = lessonsRef.doc();
+      await lessonDoc.set({
+        'title': t,
+        'description': _descCtrl.text.trim(),
+        'order': count + 1,
+        'contentUrl': '',
+        'contentType': 'text',
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      if (_newLessonFile != null) {
+        setState(() {
+          _uploadingLessonFile = true;
+          _newLessonUploadProgress = 0;
+        });
+        try {
+          await _uploadLessonContent(
+            courseId: widget.courseId,
+            lessonId: lessonDoc.id,
+            file: _newLessonFile!,
+            onProgress: (progress) {
+              if (!mounted) return;
+              setState(() => _newLessonUploadProgress = progress);
+            },
+          );
+        } finally {
+          if (mounted) setState(() => _uploadingLessonFile = false);
+        }
+      }
+      _titleCtrl.clear();
+      _descCtrl.clear();
+      if (mounted) {
+        setState(() {
+          _newLessonFile = null;
+          _newLessonUploadProgress = 0;
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: $e')));
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _deleteLesson(String lessonId) async {
+    await FirebaseFirestore.instance
+        .collection('courses')
+        .doc(widget.courseId)
+        .collection('lessons')
+        .doc(lessonId)
+        .delete();
+  }
+
+  Future<void> _editLesson(
+    String lessonId,
+    Map<String, dynamic> lessonData,
+  ) async {
+    final titleCtrl = TextEditingController(
+      text: (lessonData['title'] as String?) ?? '',
+    );
+    final descCtrl = TextEditingController(
+      text: (lessonData['description'] as String?) ?? '',
+    );
+    PlatformFile? replacementFile;
+    bool replacingFile = false;
+    double replaceProgress = 0;
+
+    try {
+      final shouldSave = await showModalBottomSheet<bool>(
+        context: context,
+        isScrollControlled: true,
+        builder: (sheetContext) {
+          return StatefulBuilder(
+            builder: (context, setSheetState) {
+              return Padding(
+                padding: EdgeInsets.only(
+                  bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
+                ),
+                child: SafeArea(
+                  child: Container(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Expanded(
+                              child: Text(
+                                'Edit Lesson',
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              onPressed: () => Navigator.of(sheetContext).pop(),
+                              icon: const Icon(Icons.close),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: titleCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Lesson title',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: descCtrl,
+                          maxLines: 3,
+                          decoration: const InputDecoration(
+                            labelText: 'Description',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton.icon(
+                          onPressed: replacingFile
+                              ? null
+                              : () async {
+                                  final picked = await _pickLessonFile();
+                                  if (picked == null) return;
+                                  setSheetState(() {
+                                    replacementFile = picked;
+                                  });
+                                },
+                          icon: const Icon(Icons.upload_file),
+                          label: Text(
+                            replacementFile == null
+                                ? 'Replace File'
+                                : 'Selected: ${replacementFile!.name}',
+                          ),
+                        ),
+                        if (replacementFile != null) ...[
+                          const SizedBox(height: 8),
+                          LinearProgressIndicator(value: replaceProgress),
+                        ],
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () =>
+                                    Navigator.of(sheetContext).pop(),
+                                child: const Text('Cancel'),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: FilledButton(
+                                onPressed: replacingFile
+                                    ? null
+                                    : () =>
+                                          Navigator.of(sheetContext).pop(true),
+                                child: const Text('Save Changes'),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      );
+
+      if (shouldSave != true) return;
+
+      await FirebaseFirestore.instance
+          .collection('courses')
+          .doc(widget.courseId)
+          .collection('lessons')
+          .doc(lessonId)
+          .update({
+            'title': titleCtrl.text.trim(),
+            'description': descCtrl.text.trim(),
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+
+      if (replacementFile != null) {
+        replacingFile = true;
+        await _uploadLessonContent(
+          courseId: widget.courseId,
+          lessonId: lessonId,
+          file: replacementFile!,
+          onProgress: (progress) {
+            replaceProgress = progress;
+          },
+        );
+      }
+    } finally {
+      titleCtrl.dispose();
+      descCtrl.dispose();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.9,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (context, sc) {
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom,
+          ),
+          child: Column(
+            children: [
+              const SizedBox(height: 8),
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: [
+                    const Icon(Icons.playlist_play, color: _mentorTeal),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Lessons: ${widget.courseTitle}',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 20),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: _titleCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Lesson title',
+                        border: OutlineInputBorder(),
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _descCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Description (optional)',
+                        border: OutlineInputBorder(),
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                      ),
+                      maxLines: 2,
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _uploadingLessonFile
+                                ? null
+                                : () async {
+                                    final picked = await _pickLessonFile();
+                                    if (picked == null) return;
+                                    if (!mounted) return;
+                                    setState(() => _newLessonFile = picked);
+                                  },
+                            icon: const Icon(Icons.attach_file),
+                            label: Text(
+                              _newLessonFile == null
+                                  ? 'Attach File'
+                                  : _newLessonFile!.name,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (_newLessonFile != null) ...[
+                      const SizedBox(height: 8),
+                      LinearProgressIndicator(value: _newLessonUploadProgress),
+                    ],
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: _saving ? null : _addLesson,
+                        style: FilledButton.styleFrom(
+                          backgroundColor: _mentorTeal,
+                        ),
+                        icon: _saving
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.add),
+                        label: const Text('Add Lesson'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 20),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: [
+                    Icon(Icons.list, size: 16, color: Colors.grey),
+                    SizedBox(width: 6),
+                    Text(
+                      'Current Lessons',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: Colors.grey,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 6),
+              Expanded(
+                child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                  stream: FirebaseFirestore.instance
+                      .collection('courses')
+                      .doc(widget.courseId)
+                      .collection('lessons')
+                      .orderBy('order')
+                      .snapshots(),
+                  builder: (context, snap) {
+                    if (snap.connectionState == ConnectionState.waiting) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+                    final lessons = snap.data?.docs ?? [];
+                    if (lessons.isEmpty) {
+                      return const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(20),
+                          child: Text(
+                            'No lessons yet. Add one above.',
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        ),
+                      );
+                    }
+                    return ListView.builder(
+                      controller: sc,
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      itemCount: lessons.length,
+                      itemBuilder: (context, i) {
+                        final d = lessons[i].data();
+                        final lid = lessons[i].id;
+                        final ltitle = (d['title'] as String?) ?? 'Untitled';
+                        final ldesc = (d['description'] as String?) ?? '';
+                        return Card(
+                          margin: const EdgeInsets.only(bottom: 10),
+                          child: ListTile(
+                            onTap: () => _editLesson(lid, d),
+                            leading: CircleAvatar(
+                              backgroundColor: _mentorTeal.withValues(
+                                alpha: 0.12,
+                              ),
+                              child: Text(
+                                '${i + 1}',
+                                style: const TextStyle(
+                                  color: _mentorTeal,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            title: Text(
+                              ltitle,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (ldesc.isNotEmpty)
+                                  Text(
+                                    ldesc,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                if ((d['contentUrl'] as String?)?.isNotEmpty ==
+                                    true)
+                                  const Padding(
+                                    padding: EdgeInsets.only(top: 4),
+                                    child: Text(
+                                      'Content attached',
+                                      style: TextStyle(
+                                        color: Colors.green,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            trailing: Wrap(
+                              spacing: 0,
+                              children: [
+                                IconButton(
+                                  icon: const Icon(
+                                    Icons.edit_outlined,
+                                    color: Colors.indigo,
+                                  ),
+                                  onPressed: () => _editLesson(lid, d),
+                                ),
+                                IconButton(
+                                  icon: const Icon(
+                                    Icons.delete_outline,
+                                    color: Colors.red,
+                                  ),
+                                  onPressed: () => _deleteLesson(lid),
+                                ),
+                              ],
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 4,
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MaterialsSheet extends StatefulWidget {
+  const _MaterialsSheet({
+    required this.courseId,
+    required this.courseTitle,
+    required this.onAddMaterial,
+  });
+
+  final String courseId;
+  final String courseTitle;
+  final VoidCallback onAddMaterial;
+
+  @override
+  State<_MaterialsSheet> createState() => _MaterialsSheetState();
+}
+
+class _MaterialsSheetState extends State<_MaterialsSheet> {
+  Reference? _storageReferenceFor(String resourceUrl) {
+    final url = resourceUrl.trim();
+    if (url.isEmpty) return null;
+    if (url.startsWith('gs://') ||
+        url.contains('firebasestorage.googleapis.com')) {
+      return FirebaseStorage.instance.refFromURL(url);
+    }
+    if (url.startsWith('courses/')) {
+      return FirebaseStorage.instance.ref(url);
+    }
+    return null;
+  }
+
+  Future<void> _deleteMaterial(String materialId, String resourceUrl) async {
+    try {
+      final storageRef = _storageReferenceFor(resourceUrl);
+      if (storageRef != null) {
+        try {
+          await storageRef.delete();
+        } catch (storageError) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Storage cleanup skipped: $storageError')),
+          );
+        }
+      }
+
+      await FirebaseFirestore.instance
+          .collection('course_materials')
+          .doc(materialId)
+          .delete();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Material deleted')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to delete material: $e')));
+    }
+  }
+
+  void _openUploadScreen() {
+    Navigator.of(context).pop();
+    widget.onAddMaterial();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.85,
+      minChildSize: 0.45,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (context, sc) {
+        return SafeArea(
+          child: Column(
+            children: [
+              const SizedBox(height: 8),
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: [
+                    const Icon(Icons.folder_open, color: _mentorTeal),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Materials: ${widget.courseTitle}',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 20),
+              Expanded(
+                child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                  stream: FirebaseFirestore.instance
+                      .collection('course_materials')
+                      .where('courseId', isEqualTo: widget.courseId)
+                      .snapshots(),
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+
+                    final docs = snapshot.data?.docs.toList() ?? [];
+                    docs.sort((a, b) {
+                      final aDate =
+                          (a.data()['createdAt'] as Timestamp?)?.toDate() ??
+                          DateTime.fromMillisecondsSinceEpoch(0);
+                      final bDate =
+                          (b.data()['createdAt'] as Timestamp?)?.toDate() ??
+                          DateTime.fromMillisecondsSinceEpoch(0);
+                      return bDate.compareTo(aDate);
+                    });
+
+                    if (docs.isEmpty) {
+                      return const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(20),
+                          child: Text(
+                            'No materials uploaded yet.',
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        ),
+                      );
+                    }
+
+                    return ListView.separated(
+                      controller: sc,
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      itemCount: docs.length,
+                      separatorBuilder: (context, index) =>
+                          const SizedBox(height: 10),
+                      itemBuilder: (context, index) {
+                        final doc = docs[index];
+                        final data = doc.data();
+                        final title =
+                            (data['title'] as String?)?.trim().isNotEmpty ==
+                                true
+                            ? (data['title'] as String).trim()
+                            : 'Untitled material';
+                        final description =
+                            (data['description'] as String?)?.trim() ?? '';
+                        final resourceUrl =
+                            (data['resourceUrl'] as String?)?.trim() ?? '';
+
+                        return Card(
+                          child: ListTile(
+                            leading: const CircleAvatar(
+                              backgroundColor: Color(0x1A0E7C86),
+                              child: Icon(
+                                Icons.article_outlined,
+                                color: _mentorTeal,
+                              ),
+                            ),
+                            title: Text(title),
+                            subtitle: description.isEmpty
+                                ? (resourceUrl.isEmpty
+                                      ? null
+                                      : Text(
+                                          resourceUrl,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ))
+                                : Text(
+                                    description,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                            trailing: IconButton(
+                              icon: const Icon(
+                                Icons.delete_outline,
+                                color: Colors.red,
+                              ),
+                              onPressed: () =>
+                                  _deleteMaterial(doc.id, resourceUrl),
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+              SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: _openUploadScreen,
+                      icon: const Icon(Icons.add),
+                      label: const Text('Add Material'),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ─── Shared widgets ──────────────────────────────────────────────────────────
+
+class _Summary {
+  final String name;
+  final int courses;
+  final int students;
+  final double rating;
+  const _Summary({
+    required this.name,
+    required this.courses,
+    required this.students,
+    required this.rating,
+  });
+}
+
+class _StatCard extends StatelessWidget {
+  final String label, value;
+  final IconData icon;
+  const _StatCard(this.label, this.value, this.icon);
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: Colors.grey.withValues(alpha: 0.15)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: _mentorTeal.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(icon, color: _mentorTeal, size: 22),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              value,
+              style: const TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF102A43),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Color(0xFF52616B),
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CoursePreviewCard extends StatelessWidget {
+  final String title;
+  final int enrolledCount;
+  final bool isPublished;
+
+  const _CoursePreviewCard({
+    required this.title,
+    required this.enrolledCount,
+    required this.isPublished,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 160,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.withValues(alpha: 0.15)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Thumbnail
+          Container(
+            height: 90,
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [_mentorTeal, Color(0xFF17A2B8)],
+              ),
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(16),
+                topRight: Radius.circular(16),
+              ),
+            ),
+            child: const Center(
+              child: Icon(Icons.school_rounded, color: Colors.white, size: 32),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF102A43),
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.people,
+                      size: 12,
+                      color: Color(0xFF52616B),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '$enrolledCount',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFF52616B),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: isPublished
+                        ? Colors.green.withValues(alpha: 0.1)
+                        : Colors.orange.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    isPublished ? 'Published' : 'Draft',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      color: isPublished ? Colors.green : Colors.orange,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
